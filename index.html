@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SS Checklist</title>
+<meta name="description" content="Daily task checklist with morning and evening reminders.">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#1f1d19">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!--
+  SS CHECKLIST — NOTIFICATIONS SITE · index.html  (v14.0)
+  1. Asks to allow notifications — only when they are not allowed yet
+     (first time, Chrome data cleared, or notifications turned off). Once allowed,
+     it never asks again; it just opens.
+  2. Gets this phone's notification key from Firebase and opens the normal
+     checklist portal inside this page, handing it the key. The portal tells the
+     sheet once which person uses this phone.
+  Edit only config.js.
+-->
+<style>
+  :root{ --ink:#1f1d19; --paper:#f6f3ec; --card:#fffdf8; --gold:#a8843a; --muted:#6d675c; --line:#e4dccb; --late:#a33a2c; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:var(--paper); color:var(--ink);
+    font-family:-apple-system, "Segoe UI", Roboto, "Noto Sans", Arial, sans-serif; }
+  #app{ position:fixed; inset:0; width:100%; height:100%; border:0; background:var(--paper); }
+  .gate{ min-height:100%; display:flex; align-items:center; justify-content:center;
+    padding:max(24px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  .card{ width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:18px;
+    padding:28px 22px; box-shadow:0 10px 30px rgba(31,29,25,.08); text-align:center; }
+  .bell{ width:64px; height:64px; margin:0 auto 14px; border-radius:18px; background:var(--ink); color:#f3d78f;
+    display:flex; align-items:center; justify-content:center; font-size:32px; }
+  h1{ font-size:21px; margin:0 0 8px; line-height:1.3; }
+  p{ margin:0 0 14px; color:var(--muted); font-size:15px; line-height:1.55; }
+  ol{ text-align:left; margin:4px 0 16px; padding-left:22px; color:var(--ink); font-size:15px; line-height:1.6; }
+  .btn{ display:block; width:100%; height:52px; border:0; border-radius:12px; background:var(--ink); color:#fff;
+    font:inherit; font-size:17px; font-weight:600; cursor:pointer; margin-top:6px; }
+  .btn:focus-visible{ outline:3px solid var(--gold); outline-offset:3px; }
+  .link{ background:none; border:0; color:var(--muted); font:inherit; font-size:14px; text-decoration:underline; margin-top:14px; cursor:pointer; }
+  .note{ font-size:13px; color:var(--muted); margin-top:12px; }
+  .err{ color:var(--late); }
+  .toast{ position:fixed; left:50%; bottom:max(16px, env(safe-area-inset-bottom)); transform:translateX(-50%); z-index:5;
+    max-width:calc(100% - 32px); background:var(--ink); color:#fff; padding:11px 16px; border-radius:10px; font-size:14px;
+    box-shadow:0 8px 24px rgba(0,0,0,.2); }
+  .hide{ display:none !important; }
+  @media (prefers-color-scheme: dark){
+    :root{ --ink:#f1ece0; --paper:#16140f; --card:#211e17; --muted:#b8b0a0; --line:#3a352a; }
+    .bell{ background:#f1ece0; color:#7a5d1d; } .btn{ color:#16140f; }
+  }
+</style>
+<script src="config.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js"></script>
+</head>
+<body>
+  <div id="gate" class="gate"><div class="card" id="card"><div class="bell" aria-hidden="true">🔔</div><h1>Opening…</h1></div></div>
+  <iframe id="app" class="hide" title="SS Checklist" allow="camera; clipboard-write"></iframe>
+
+<script>
+(function(){
+  var C = self.SS_CONFIG || {};
+  var NAME = C.appName || 'SS Checklist';
+  var frame = document.getElementById('app'), gate = document.getElementById('gate'), card = document.getElementById('card');
+  document.title = NAME;
+
+  function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function screen(html){ card.innerHTML = '<div class="bell" aria-hidden="true">🔔</div>' + html; gate.classList.remove('hide'); frame.classList.add('hide'); }
+  function toast(msg){
+    var t = document.createElement('div'); t.className = 'toast'; t.textContent = msg; document.body.appendChild(t);
+    setTimeout(function(){ if (t.parentNode) t.parentNode.removeChild(t); }, 6000);
+  }
+  function isIOS(){ return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); }
+  function installed(){ return (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true; }
+
+  /* the checklist itself, with this phone's key */
+  function openPortal(key){
+    var u = C.portalUrl + (key ? (C.portalUrl.indexOf('?') < 0 ? '?' : '&') + 'push=' + encodeURIComponent(key) : '');
+    frame.src = u;
+    frame.classList.remove('hide'); gate.classList.add('hide');
+  }
+
+  /* ── the screens ── */
+  function askScreen(){
+    screen('<h1>Turn on task reminders</h1>' +
+      '<p>' + esc(NAME) + ' tells you in the morning which tasks are due today, and in the evening if any are still pending.</p>' +
+      '<button class="btn" id="allow">Allow notifications</button>' +
+      '<p class="note">Your phone will ask once. Tap <b>Allow</b>.</p>');
+    document.getElementById('allow').onclick = function(){
+      Notification.requestPermission().then(function(p){
+        if (p === 'granted') connect(); else blockedScreen();
+      });
+    };
+  }
+  function blockedScreen(){
+    screen('<h1>Notifications are blocked</h1>' +
+      '<p>Reminders are required for the checklist. Turn them on, then tap Try again:</p>' +
+      (isIOS()
+        ? '<ol><li>Open <b>Settings</b> on the iPhone</li><li><b>Notifications</b> → <b>' + esc(NAME) + '</b></li><li>Switch on <b>Allow Notifications</b></li></ol>'
+        : '<ol><li>Tap the <b>🔒</b> or <b>ⓘ</b> to the left of the address</li><li><b>Permissions</b> → <b>Notifications</b> → <b>Allow</b></li><li>Come back and tap <b>Try again</b></li></ol>') +
+      '<button class="btn" id="again">Try again</button>');
+    document.getElementById('again').onclick = function(){ location.reload(); };
+  }
+  function iosInstallScreen(){
+    screen('<h1>Add to your Home Screen first</h1>' +
+      '<p>On iPhone, reminders work only from the Home Screen icon.</p>' +
+      '<ol><li>Tap <b>Share</b> (the square with the arrow) at the bottom</li><li>Tap <b>Add to Home Screen</b> → <b>Add</b></li><li>Open <b>' + esc(NAME) + '</b> from the new icon</li></ol>' +
+      '<button class="link" id="skip">Open the checklist without reminders</button>');
+    document.getElementById('skip').onclick = function(){ openPortal(''); };
+  }
+  function unsupportedScreen(){
+    screen('<h1>This browser cannot show reminders</h1>' +
+      '<p>Open this link in <b>Google Chrome</b> to get morning and evening task reminders.</p>' +
+      '<button class="btn" id="go">Open the checklist anyway</button>');
+    document.getElementById('go').onclick = function(){ openPortal(''); };
+  }
+  function setupScreen(){
+    screen('<h1>Almost ready</h1><p class="err">This link is not set up yet: config.js still has empty values.</p>' +
+      '<p>Ask the office to finish the notification setup.</p>');
+  }
+
+  /* ── allowed: get this phone's key, then open the checklist ── */
+  function connect(){
+    screen('<h1>Opening…</h1>');
+    navigator.serviceWorker.register('firebase-messaging-sw.js').then(function(reg){
+      if (!firebase.apps.length) firebase.initializeApp(C.firebase);
+      var m = firebase.messaging();
+      /* a reminder that arrives while the checklist is open on screen */
+      m.onMessage(function(payload){
+        var n = (payload && payload.notification) || {};
+        reg.showNotification(n.title || NAME, { body: n.body || '', icon: 'icon-192.png', tag: 'ss-checklist', data: { own: true } });
+      });
+      return m.getToken({ vapidKey: C.vapidKey, serviceWorkerRegistration: reg });
+    }).then(function(key){
+      openPortal(key || '');
+      if (!key) toast('Reminders could not be switched on just now — they will be tried again next time.');
+    }).catch(function(e){
+      openPortal('');
+      toast('Reminders could not be switched on: ' + (e && e.message ? e.message : e));
+    });
+  }
+
+  /* ── start ── */
+  var unset = !C.portalUrl || /PASTE/.test(C.portalUrl) || !C.firebase || /PASTE/.test(C.firebase.apiKey || '') || /PASTE/.test(C.vapidKey || '');
+  if (unset) { setupScreen(); return; }
+  var ok = ('serviceWorker' in navigator) && ('Notification' in window) && ('PushManager' in window);
+  if (!ok) { if (isIOS() && !installed()) iosInstallScreen(); else unsupportedScreen(); return; }
+  if (Notification.permission === 'granted') connect();          /* the usual case: no question, straight in */
+  else if (Notification.permission === 'denied') blockedScreen();
+  else askScreen();                                               /* first time, or Chrome data cleared */
+})();
+</script>
+</body>
+</html>
