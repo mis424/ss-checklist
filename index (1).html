@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>SS Checklist</title>
+  <meta name="theme-color" content="#1F4D3D">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="SS Checklist">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+
+  <!--
+  ════════════════════════════════════════════════════════════════════
+   SS CHECKLIST — the staff link with notifications (GitHub Pages)
+
+   This page does two things:
+     1. Shows the normal SS Checklist portal (the Apps Script web app)
+        filling the whole screen — sign-in, tasks, dashboard, everything.
+     2. Asks this phone once for permission to show notifications, and
+        hands the phone's notification key to the portal, which saves it
+        in the sheet (Notifications sheet → Phones).
+
+   The sheet then sends a morning and an evening reminder to everyone who
+   still has tasks open (hours set in 2️⃣ Settings → Notifications).
+
+   THE ONLY THINGS TO CHANGE, if ever needed, are the three values in the
+   SETTINGS block below: the portal link, the Firebase web config and the
+   VAPID key. All three are public — safe to keep on GitHub.
+   The PRIVATE Firebase key never goes here; it lives only in the script.
+  ════════════════════════════════════════════════════════════════════
+  -->
+
+  <style>
+    :root{
+      --brand:#1F4D3D; --brand-2:#2A6650; --on-brand:#FBF8F1;
+      --page:#F7F3EA; --ink:#1A1815; --muted:#544E43; --line:#DCD2BC;
+      --gold:#9A7628; --late:#A4462F;
+      --safe-t:env(safe-area-inset-top, 0px);
+    }
+    *{box-sizing:border-box;}
+    html, body{margin:0; height:100%; background:var(--page);
+               font-family:system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;}
+    body{display:flex; flex-direction:column; height:100vh; height:100dvh; overflow:hidden;}
+
+    /* the reminder bar — only when there is something to say */
+    .bn{flex:none; background:var(--brand); color:var(--on-brand);
+        padding:calc(10px + var(--safe-t)) 14px 10px; font-size:14px; line-height:1.45;
+        display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+    .bn.warn{background:#fff4e5; color:#7a4b00; border-bottom:1px solid #f0d3a8;}
+    .bn.err{background:#fbe9e5; color:var(--late); border-bottom:1px solid #f0c9be;}
+    .bn .t{flex:1 1 240px;}
+    .bn button{font:inherit; font-size:13.5px; border:0; border-radius:9px; cursor:pointer;
+               padding:9px 14px; flex:none;}
+    .bn .go{background:var(--on-brand); color:var(--brand); font-weight:600;}
+    .bn .later{background:transparent; color:inherit; border:1px solid currentColor; opacity:.85;}
+    .bn.warn .go, .bn.err .go{background:var(--brand); color:var(--on-brand);}
+    .hide{display:none !important;}
+
+    /* the portal itself */
+    #app{flex:1 1 auto; width:100%; border:0; display:block; background:var(--page);}
+
+    /* while the portal loads */
+    #wait{position:fixed; inset:0; display:flex; flex-direction:column; align-items:center;
+          justify-content:center; gap:16px; color:var(--muted); font-size:14px;
+          background:var(--page); pointer-events:none; transition:opacity .3s;}
+    #wait img{width:72px; height:72px; border-radius:18px;}
+    #wait.gone{opacity:0;}
+  </style>
+</head>
+<body>
+
+  <div id="bn" class="bn hide" role="status">
+    <span class="t" id="bnText"></span>
+    <button type="button" class="go hide" id="bnGo"></button>
+    <button type="button" class="later hide" id="bnLater"></button>
+  </div>
+
+  <iframe id="app" title="SS Checklist" allow="clipboard-write"></iframe>
+
+  <div id="wait"><img src="icon-192.png" alt=""><span>Opening SS Checklist…</span></div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js"></script>
+
+  <script>
+  /* ═════════════════════════════ SETTINGS ═════════════════════════════ */
+
+  /* the SS Checklist web app — the same /exec link staff already have */
+  var APP_URL = 'https://script.google.com/macros/s/AKfycbyTdfcYhHFkWUrIDiPDcaoxOzgN8QtYfbPiSCjOd8CzzL6S8YBod9Aaf4DgMMl3PSHI/exec';
+
+  /* Firebase → Project settings → General → Your apps → Config */
+  var FIREBASE = {
+    apiKey: 'AIzaSyAE5mgg2AoRSednNj8sEN1hBkI56sEGsvw',
+    authDomain: 'ss-checklists.firebaseapp.com',
+    projectId: 'ss-checklists',
+    storageBucket: 'ss-checklists.firebasestorage.app',
+    messagingSenderId: '88988590990',
+    appId: '1:88988590990:web:cc62aa4937e6b4a476badf'
+  };
+
+  /* Firebase → Project settings → Cloud Messaging → Web Push certificates */
+  var VAPID = 'BECGL7Om5AynoD_Yu1bQOpSpBxZz0jFSjCI3S0lJFSMD-LrBA_49eUX64geNmwYh-NXQuKwo-5POAGn6RTC9YIs';
+
+  /* ═══════════════════════════════════════════════════════════════════ */
+
+  (function(){
+    var frame = document.getElementById('app');
+    var wait = document.getElementById('wait');
+    var params = new URLSearchParams(location.search);
+    var view = params.get('p') || '';            /* ?p=task / ?p=dash pass straight through */
+
+    frame.addEventListener('load', function(){
+      wait.classList.add('gone');
+      setTimeout(function(){ wait.classList.add('hide'); }, 350);
+    });
+
+    function portalUrl(key){
+      var q = [];
+      if (view) q.push('p=' + encodeURIComponent(view));
+      if (key) q.push('push=' + encodeURIComponent(key));
+      return APP_URL + (q.length ? '?' + q.join('&') : '');
+    }
+    function openPortal(key){ frame.src = portalUrl(key); }
+
+    /* ── the bar at the top ── */
+    var LATER_KEY = 'ssc_bar_later';
+    function snoozed(kind){
+      try {
+        var m = JSON.parse(localStorage.getItem(LATER_KEY) || '{}');
+        return m[kind] && m[kind] > Date.now();
+      } catch(e){ return false; }
+    }
+    function snooze(kind, days){
+      try {
+        var m = JSON.parse(localStorage.getItem(LATER_KEY) || '{}');
+        m[kind] = Date.now() + days * 86400000;
+        localStorage.setItem(LATER_KEY, JSON.stringify(m));
+      } catch(e){}
+    }
+    function hideBar(){ document.getElementById('bn').classList.add('hide'); }
+    function bar(kind, text, go, later, onGo, laterDays){
+      var bn = document.getElementById('bn');
+      bn.className = 'bn' + (kind === 'warn' ? ' warn' : kind === 'err' ? ' err' : '');
+      document.getElementById('bnText').textContent = text;
+      var g = document.getElementById('bnGo'), l = document.getElementById('bnLater');
+      g.classList.toggle('hide', !go);   g.textContent = go || '';
+      l.classList.toggle('hide', !later); l.textContent = later || '';
+      g.onclick = onGo || null;
+      l.onclick = function(){ hideBar(); if (laterDays) snooze(kind + '|' + text.slice(0, 20), laterDays); };
+      bn.classList.remove('hide');
+    }
+
+    /* ── what this phone can do ── */
+    var ua = navigator.userAgent || '';
+    var ios = /iphone|ipad|ipod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    var standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+                     navigator.standalone === true;
+    var supported = ('serviceWorker' in navigator) && ('Notification' in window) &&
+                    ('PushManager' in window) && typeof firebase !== 'undefined';
+
+    /* ── Firebase, set up once ── */
+    var ready = null, swReg = null, messaging = null;
+    function setup(){
+      if (ready) return ready;
+      ready = navigator.serviceWorker.register('firebase-messaging-sw.js', { scope: './' })
+        .then(function(reg){ swReg = reg; return navigator.serviceWorker.ready; })
+        .then(function(){
+          if (!firebase.apps.length) firebase.initializeApp(FIREBASE);
+          messaging = firebase.messaging();
+          /* page open: Firebase does not show it by itself, so show it here */
+          messaging.onMessage(function(p){
+            var n = p.notification || {};
+            swReg.showNotification(n.title || 'SS Checklist', {
+              body: n.body || '', icon: n.icon || 'icon-192.png', badge: 'icon-192.png',
+              tag: 'ss-checklist', renotify: true,
+              data: { url: (p.fcmOptions && p.fcmOptions.link) || './' }
+            });
+          });
+        });
+      return ready;
+    }
+    function phoneKey(){
+      return setup().then(function(){
+        return messaging.getToken({ vapidKey: VAPID, serviceWorkerRegistration: swReg });
+      });
+    }
+    function inTime(promise, ms){
+      return new Promise(function(ok, fail){
+        var t = setTimeout(function(){ fail(new Error('took too long')); }, ms);
+        promise.then(function(v){ clearTimeout(t); ok(v); }, function(e){ clearTimeout(t); fail(e); });
+      });
+    }
+
+    /* the person tapped "Turn on" */
+    function turnOn(){
+      document.getElementById('bnGo').textContent = 'Please wait…';
+      Notification.requestPermission().then(function(p){
+        if (p !== 'granted'){ showDenied(); return; }
+        phoneKey().then(function(key){
+          if (!key) throw new Error('no key from Firebase');
+          openPortal(key);                     /* reloads once, now with this phone's key */
+          bar('ok', '✓ Reminders are on for this phone. You will get them in the morning and evening when tasks are open.', '', '');
+          setTimeout(hideBar, 6000);
+        }).catch(showError);
+      });
+    }
+
+    function showDenied(){
+      if (snoozed('warn|' + 'blocked')) return;
+      bar('warn', '🔕 Reminders are blocked for this site. To allow them: tap the 🔒 or ⓘ next to the web address → Permissions → Notifications → Allow, then reload.',
+          '', 'OK', null, 7);
+    }
+    function showError(e){
+      bar('err', 'Reminders could not be turned on (' + (e && e.message ? e.message : 'unknown problem') +
+          '). Check the internet and try again.', 'Try again', 'Close', function(){ turnOn(); });
+    }
+
+    /* ═════ start ═════ */
+    if (!supported){
+      openPortal('');
+      if (ios && !standalone){
+        if (!snoozed('warn|ios')) bar('warn',
+          '🔔 To get task reminders on iPhone: tap Share (the square with ↑) → "Add to Home Screen", then open SS Checklist from the new icon.',
+          '', 'OK', null, 3);
+      } else if (!snoozed('warn|none')){
+        bar('warn', '🔔 This browser cannot show reminders. Open this link in Chrome to get them.', '', 'OK', null, 3);
+      }
+      return;
+    }
+
+    var perm = Notification.permission;
+    if (perm === 'granted'){
+      /* already allowed — fetch this phone's key, then open the portal with it */
+      inTime(phoneKey(), 7000).then(function(key){ openPortal(key || ''); },
+                                    function(){ openPortal(''); });
+    } else if (perm === 'denied'){
+      openPortal('');
+      showDenied();
+    } else {
+      openPortal('');
+      if (!snoozed('ask|x')){
+        bar('ask', '🔔 Turn on task reminders — a notification in the morning and evening when you have tasks open. (The page reloads once.)',
+            'Turn on', 'Not now', turnOn, 0);
+        document.getElementById('bnLater').onclick = function(){ hideBar(); snooze('ask|x', 2); };
+      }
+    }
+  })();
+  </script>
+</body>
+</html>
